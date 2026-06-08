@@ -1,0 +1,508 @@
+# version: "3.8"
+
+# # ==========================================
+# # AIRFLOW COMMON TEMPLATE (YAML ANCHOR)
+# # ==========================================
+# x-airflow-common: &airflow-common
+#   build:
+#     context: .
+#     dockerfile: Dockerfile # Bakes requirements.txt cleanly into an image
+#   image: enterprise-dataops-airflow:latest
+#   environment:
+#     AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+#     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+#     AIRFLOW__CORE__FERNET_KEY: "cryptography_fernet_key_placeholder_here="
+#     AIRFLOW__CORE__LOGGING_LEVEL: INFO
+#     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+#     AIRFLOW_WEBSERVER_SECRET_KEY: "this_is_a_very_secured_key"
+#   volumes:
+#     - ./dags:/opt/airflow/dags
+#     - ./logs:/opt/airflow/logs
+#     - ./plugins:/opt/airflow/plugins
+#   user: "${AIRFLOW_UID:-50000}:0"
+#   logging:
+#     options:
+#       max-size: "10m"
+#       max-file: "3"
+#   networks:
+#     - confluent
+
+# services:
+#   # --- METADATA DATABASE ---
+#   postgres:
+#     image: postgres:14-alpine
+#     environment:
+#       POSTGRES_USER: airflow
+#       POSTGRES_PASSWORD: airflow
+#       POSTGRES_DB: airflow
+#     volumes:
+#       - postgres_data:/var/lib/postgresql/data
+#     logging:
+#       options:
+#         max-size: "10m"
+#         max-file: "3"
+#     healthcheck:
+#       test: ["CMD-SHELL", "pg_isready -U airflow"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+#     networks:
+#       - confluent
+
+#   # --- AIRFLOW INITIALIZATION (SAFE DATABASE SETUP) ---
+#   airflow-init:
+#     <<: *airflow-common
+#     command: version
+#     environment:
+#       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+#       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+#       _AIRFLOW_DB_UPGRADE: "true"
+#       _AIRFLOW_WWW_USER_CREATE: "true"
+#       _AIRFLOW_WWW_USER_USERNAME: airflow
+#       _AIRFLOW_WWW_USER_PASSWORD: airflow
+#     depends_on:
+#       postgres:
+#         condition: service_healthy
+
+#   # --- AIRFLOW CORE SERVICES ---
+#   webserver:
+#     <<: *airflow-common
+#     command: webserver
+#     ports:
+#       - "8080:8080"
+#     volumes:
+#       - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+#       - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+#       - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+#       - ./requirements.txt:/opt/airflow/requirements.txt
+#       - ./script/entrypoint.sh:/opt/airflow/script/entrypoint.sh
+#     entrypoint: ["/bin/bash", "/opt/airflow/script/entrypoint.sh"]
+#     healthcheck:
+#       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 5
+#     restart: always
+#     depends_on:
+#       airflow-init:
+#         condition: service_completed_successfully
+
+#   scheduler:
+#     <<: *airflow-common
+#     command: scheduler
+#     restart: always
+#     depends_on:
+#       webserver:
+#         condition: service_healthy
+
+#   # --- KAFKA STREAMING INFRASTRUCTURE ---
+#   zookeeper:
+#     image: confluentinc/cp-zookeeper:7.4.0
+#     environment:
+#       ZOOKEEPER_CLIENT_PORT: 2181
+#       ZOOKEEPER_TICK_TIME: 2000
+#     healthcheck:
+#       test: ["CMD", "nc", "-z", "localhost", "2181"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+#     networks:
+#       - confluent
+
+#   broker:
+#     image: confluentinc/cp-kafka:7.4.0
+#     container_name: de1-broker-1
+#     ports:
+#       - "9092:9092"
+#     depends_on:
+#       zookeeper:
+#         condition: service_healthy
+#     environment:
+#       # KAFKA_BROKER_ID: 1
+#       # KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+#       # KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+#       # KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://broker:29092
+#       # KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+#       KAFKA_BROKER_ID: 1
+#       KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+#       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+#       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+#       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+#       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+#       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+#     healthcheck:
+#       test:
+#         [
+#           "CMD-SHELL",
+#           "kafka-topics --bootstrap-server localhost:9092 --list || exit 1",
+#         ]
+#       interval: 15s
+#       timeout: 10s
+#       retries: 3
+#     networks:
+#       - confluent
+
+#   schema-registry:
+#     image: confluentinc/cp-schema-registry:7.4.0
+#     ports:
+#       - "8081:8081"
+#     depends_on:
+#       broker:
+#         condition: service_healthy
+#     environment:
+#       SCHEMA_REGISTRY_HOST_NAME: schema-registry
+#       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "broker:29092"
+#       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:8081/"]
+#       interval: 20s
+#       timeout: 10s
+#       retries: 5
+#     networks:
+#       - confluent
+
+#   # --- DISTRIBUTED COMPUTE ENGINE (SPARK) ---
+#   spark-master:
+#     image: apache/spark:3.4.1
+#     environment:
+#       - SPARK_MODE=master
+#     ports:
+#       - "9090:8080"
+#       - "7077:7077"
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 2G # Prevents spark from unbounded RAM usage
+#     networks:
+#       - confluent
+
+#   spark-worker:
+#     image: apache/spark:3.4.1
+#     depends_on:
+#       - spark-master
+#     environment:
+#       - SPARK_MODE=worker
+#       - SPARK_MASTER_URL=spark://spark-master:7077
+#       - SPARK_WORKER_CORES=2
+#       - SPARK_WORKER_MEMORY=2G
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 2.5G
+#     networks:
+#       - confluent
+#   control-center:
+#     image: confluentinc/cp-enterprise-control-center:7.4.0
+#     hostname: control-center
+#     container_name: control-center
+#     depends_on:
+#       - zookeeper
+#       - broker
+#       - schema-registry
+#     ports:
+#       - "9021:9021"
+#     environment:
+#       CONTROL_CENTER_BOOTSTRAP_SERVERS: "broker:29092"
+#       CONTROL_CENTER_ZOOKEEPER_CONNECT: "zookeeper:2181"
+#       CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+#       CONTROL_CENTER_REPLICATION_FACTOR: 1
+#       CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+#       CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+#       CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+#       PORT: 9021
+#     networks:
+#       - confluent
+#   # --- ANALYTICAL STORAGE LAYER (CASSANDRA) ---
+#   cassandra_db:
+#     image: cassandra:4.1
+#     volumes:
+#       - cassandra_data:/var/lib/cassandra
+#     ports:
+#       - "9042:9042"
+#     environment:
+#       - MAX_HEAP_SIZE=1024M # Hard production constraint for local running
+#       - HEAP_NEWSIZE=256M
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 2G
+#     healthcheck:
+#       test: ["CMD", "nodetool", "status"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 5
+#     networks:
+#       - confluent
+
+# networks:
+#   confluent:
+#     driver: bridge
+
+# volumes:
+#   postgres_data:
+#   cassandra_data:
+
+version: "3.8"
+
+# ==========================================
+# AIRFLOW COMMON TEMPLATE (YAML ANCHOR)
+# ==========================================
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: enterprise-dataops-airflow:latest
+  environment:
+    AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: "cryptography_fernet_key_placeholder_here="
+    AIRFLOW__CORE__LOGGING_LEVEL: INFO
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW_WEBSERVER_SECRET_KEY: "this_is_a_very_secured_key"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  logging:
+    options:
+      max-size: "10m"
+      max-file: "3"
+  networks:
+    - confluent
+
+services:
+  # --- METADATA DATABASE ---
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - confluent
+
+  # --- AIRFLOW INITIALIZATION ---
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      _AIRFLOW_DB_UPGRADE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- AIRFLOW CORE SERVICES ---
+  webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+      - ./requirements.txt:/opt/airflow/requirements.txt
+      - ./script/entrypoint.sh:/opt/airflow/script/entrypoint.sh
+    entrypoint: ["/bin/bash", "/opt/airflow/script/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+    depends_on:
+      webserver:
+        condition: service_healthy
+
+  # --- KAFKA STREAMING INFRASTRUCTURE ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - confluent
+
+  broker:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: broker
+    container_name: de1-broker-1
+    ports:
+      - "9092:9092"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-topics --bootstrap-server localhost:9092 --list || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - confluent
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    hostname: schema-registry
+    container_name: schema-registry
+    ports:
+      - "8081:8081"
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "broker:29092"
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    networks:
+      - confluent
+
+  # --- CONFLUENT CONTROL CENTER ---
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.4.0
+    hostname: control-center
+    container_name: control-center
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: "broker:29092"
+      CONTROL_CENTER_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      CONTROL_CENTER_CONNECT_CLUSTER: ""
+      PORT: 9021
+    networks:
+      - confluent
+
+  # --- DISTRIBUTED COMPUTE ENGINE (SPARK) ---
+  spark-master:
+    image: apache/spark:3.4.1
+    hostname: spark-master
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "9090:8080"
+      - "7077:7077"
+    volumes:
+      - ./jars:/opt/spark/jars # JAR connectors
+      - ./spark_stream.py:/opt/spark/jobs/spark_stream.py # Spark job
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    networks:
+      - confluent
+
+  spark-worker:
+    image: apache/spark:3.4.1
+    hostname: spark-worker
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2G
+    volumes:
+      - ./jars:/opt/spark/jars # JAR connectors
+      - ./spark_stream.py:/opt/spark/jobs/spark_stream.py # Spark job
+    deploy:
+      resources:
+        limits:
+          memory: 2.5G
+    networks:
+      - confluent
+
+  # --- ANALYTICAL STORAGE LAYER (CASSANDRA) ---
+  cassandra_db:
+    image: cassandra:4.1
+    hostname: cassandra
+    container_name: cassandra
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      - MAX_HEAP_SIZE=1024M
+      - HEAP_NEWSIZE=256M
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "nodetool", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - confluent
+
+networks:
+  confluent:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  cassandra_data:
