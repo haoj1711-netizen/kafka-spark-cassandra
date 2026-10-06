@@ -1,0 +1,24 @@
+flowchart LR
+  classDef source fill:#eef2ff,stroke:#4f46e5,color:#1e1b4b
+  classDef airflow fill:#eff6ff,stroke:#2563eb,color:#172554
+  classDef kafka fill:#fff7ed,stroke:#f97316,color:#431407
+  classDef spark fill:#fefce8,stroke:#ca8a04,color:#422006
+  classDef cassandra fill:#ecfeff,stroke:#0891b2,color:#164e63
+  classDef support fill:#f8fafc,stroke:#64748b,color:#0f172a
+  classDef gap fill:#faf5ff,stroke:#7c3aed,color:#3b0764,stroke-dasharray: 7 5
+
+  api[Random User API]:::source
+  airflow[Airflow daily DAG\n60-second producer burst]:::airflow
+  kafka[Kafka topic\nusers_created / JSON]:::kafka
+  spark[Spark Structured Streaming\nparse and stream writes]:::spark
+  cassandra[(Cassandra\nspark_streams.created_users)]:::cassandra
+
+  api --> airflow --> kafka --> spark --> cassandra
+
+  postgres[(PostgreSQL\nAirflow metadata)]:::support --> airflow
+  zookeeper[ZooKeeper]:::support --> kafka
+  registry[Schema Registry\ndeployed but unused by JSON flow]:::support -.-> kafka
+  control[Control Center\nKafka monitoring]:::support -.-> kafka
+  cluster[Spark master + worker]:::support --> spark
+
+  manual[Important: Spark job must be submitted\nand Docker service hostnames configured]:::gap -.-> spark
